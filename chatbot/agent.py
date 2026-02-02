@@ -4,217 +4,330 @@ from typing import Any, Dict, List, Optional, Literal, TypedDict
 
 import httpx
 from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-# --- 1. Client & Tool Definitions ---
+# --- 1. CONFIGURATION ---
 
-def _api_base_url() -> str:
-    port = os.getenv("PORT", "8000")
-    return os.getenv("API_BASE_URL", f"http://localhost:{port}").rstrip("/")
+SPOG_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJfaWQiOiI2OTVjOGY1OGUwYWZkYWQ5YTJiYTg0MjMiLCJjb21wYW55IjpudWxsLCJkaXNwbGF5TmFtZSI6IlN1bXJpdCBWYXJzaG5leSIsImZ1bGxuYW1lIjoiU3Vtcml0IFZhcnNobmV5IiwibW9iaWxlIjoiOTY2Nzc2MTY4OCIsImVtYWlsIjoic3Vtcml0LnZhcnNobmV5QHRpbWVzaW50ZXJuZXQuaW4iLCJ0aXRsZSI6IkludGVybiIsImNyZWF0ZWRfb24iOjE3NzAwMTUzNzguNTg2MTk0LCJjbGllbnQiOiJkZW1vIiwiaXNfbW9iaWxlX3ZlcmlmaWVkIjp0cnVlLCJ1c2VyX2lkIjoiNjk1YzhmNThlMGFmZGFkOWEyYmE4NDIzIiwiaW1hZ2UiOiJodHRwczovL2xoMy5nb29nbGV1c2VyY29udGVudC5jb20vYS9BQ2c4b2NMWnhvVlBxd0hsbGVIekliejl0UDFWZDNXQlZmQnhHU1IyQVVPeENMc3R6TjU0U3c9czk2LWMiLCJpc19zdXBlcl9hZG1pbiI6ZmFsc2UsImxvZ2luX3R5cGUiOiJnb29nbGUiLCJleHAiOjE3NzA2MjAxNzh9.GXR5vFR6PFKcRF0yZ7GqNtVj5AIxFiRetm-6WwoKjen1GFOalKzvJxwhrbP9FFhVCn0X2aJ-8e6SnDg_OWLNCgoEhsKHCgl9BMg-LbK8HtEWyhhPIZE45ax2Vno17DqWRjq46wLutS5HqNtmYFZzUpnqmPjOwbDpwYGDcPy8-uLm2rdFTUtjyraiFq7u1njyJIdFOwemjBQj1WJOUamJbkCbqMWQLLyy0i0ZONSRPdbyW6O7lNf0rC6kW7bZW5pyBIE2QWqdlmMSFs6zfMEFCI7CzKV2dur8X--ZzkdxdS-FxaZFMOa_kv7ePOdIRVchrV2uXAT8yjEzc0jP4CO8NQ"
+API_BASE_URL = "https://demo.spog.ai/api"
+LLAMA_URL = "http://172.29.52.251:8002/v1/chat/completions"
 
-def _http_client() -> httpx.Client:
-    return httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0))
+# --- 2. CLIENTS ---
+
+def call_llama(messages: List[Dict[str, str]]) -> str:
+    payload = {
+        "messages": messages,
+        "model": "meta-llama/Llama-3.1-8B-Instruct",
+        "temperature": 0.0
+    }
+    headers = {"Content-Type": "application/json"}
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(LLAMA_URL, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Llama Error: {e}")
+        return "{}"
+
+def _authenticated_client() -> httpx.Client:
+    headers = {"x-token": SPOG_TOKEN, "Content-Type": "application/json"}
+    return httpx.Client(headers=headers, timeout=15.0, follow_redirects=True)
+
+# --- 3. TOOLS ---
 
 @tool
-def list_users(limit: int = 10, offset: int = 0) -> Dict[str, Any]:
-    """
-    List all users from the API with pagination.
-    Args:
-        limit: Number of records to fetch (default 10).
-        offset: Number of records to skip (default 0).
-    """
-    url = f"{_api_base_url()}/api/users"
-   
-    params = {"limit": limit, "offset": offset}
+def list_tickets(limit: int = 20, offset: int = 0, search_query: str = "") -> Any:
+    """Fetches raw tickets."""
+    url = f"{API_BASE_URL}/incident/ticket"
     
-    with _http_client() as client:
-        r = client.get(url, params=params)
-        return r.json()
-
-@tool
-def get_user(user_id: str) -> Dict[str, Any]:
-    """Get a single user's details by ID."""
-    url = f"{_api_base_url()}/api/users/{user_id}"
-    with _http_client() as client:
-        r = client.get(url)
-        return r.json()
-
-@tool
-def list_items(limit: int = 10, offset: int = 0) -> Dict[str, Any]:
-    """
-    List all items from the API with pagination.
-    Args:
-        limit: Number of records to fetch (default 10).
-        offset: Number of records to skip (default 0).
-    """
-    url = f"{_api_base_url()}/api/items"
-    params = {"limit": limit, "offset": offset}
+    # Calculate Page: (Offset // Limit) + 1
+    page = (offset // limit) + 1
     
-    with _http_client() as client:
+    filters = {
+        "Created On": {"range": "Last 90 Days"},
+        "Issue Type": ["63e22aec05dd11e5dfa6901b"],
+        "Incident Linked": ["false"],
+        "search": search_query or ""
+    }
+    
+    params = {
+        "page": page, 
+        "limit": limit, 
+        "filters": json.dumps(filters),
+        "fields": "issue_id,summary,priority,assignee,created_by,status,updated_on"
+    }
+    
+    print(f"DEBUG TOOL: Fetching Page {page} (Offset={offset}, Search='{search_query}')")
+    
+    with _authenticated_client() as client:
         r = client.get(url, params=params)
-        return r.json()
+        if r.status_code != 200:
+            return {"error": f"API Error {r.status_code}"}
+        
+        data = r.json()
+        if isinstance(data, dict) and "data" in data:
+            return data["data"]
+        return data
 
 @tool
-def get_item(item_id: str) -> Dict[str, Any]:
-    """Get a single item's details by ID."""
-    url = f"{_api_base_url()}/api/items/{item_id}"
-    with _http_client() as client:
-        r = client.get(url)
-        return r.json()
+def filter_tickets_tool(tickets: List[Dict], assignee_name: Optional[str] = None, status_name: Optional[str] = None) -> List[Dict]:
+    """Client-side filtering with ROBUST STRING MATCHING."""
+    if not isinstance(tickets, list):
+        return []
 
-# --- 2. State Definition ---
+    filtered = []
+
+    def extract_names(field_data) -> List[str]:
+        names = []
+        if isinstance(field_data, list):
+            for item in field_data:
+                names.extend(extract_names(item))
+        elif isinstance(field_data, dict):
+            for key in ["name", "full_name", "email", "firstName"]:
+                if key in field_data and field_data[key]:
+                    names.append(str(field_data[key]))
+        elif isinstance(field_data, str):
+            names.append(field_data)
+        return names
+
+    print(f"DEBUG FILTER: Checking {len(tickets)} tickets. AssigneeFilter='{assignee_name}' StatusFilter='{status_name}'")
+
+    for ticket in tickets:
+        match_person = True
+        match_status = True
+        
+        # 1. Check Person
+        if assignee_name:
+            match_person = False
+            target = assignee_name.lower().strip()
+            all_names = extract_names(ticket.get("assignee")) + extract_names(ticket.get("created_by"))
+            for name in all_names:
+                n = name.lower().strip()
+                if target in n or n in target:
+                    match_person = True
+                    break
+        
+        # 2. Check Status
+        if status_name:
+            match_status = False
+            target_status = status_name.lower().strip()
+            all_statuses = extract_names(ticket.get("status"))
+            for s_name in all_statuses:
+                if target_status in s_name.lower():
+                    match_status = True
+                    break
+                
+        if match_person and match_status:
+            filtered.append(ticket)
+            
+    return filtered
+
+# --- 4. STATE MANAGEMENT & ROUTER ---
 
 class AgentState(TypedDict):
     messages: List[Any]
-    intent: Literal["user", "item", "unknown"]
-    entity_id: Optional[str]
-    # NEW: Store pagination params here (e.g. {'limit': 5, 'offset': 10})
-    page_params: Optional[Dict[str, int]] 
+    search_query: Optional[str]
+    assignee: Optional[str]
+    status: Optional[str]
+    page_params: Optional[Dict[str, int]]
+    search_mode: Literal["single_page", "deep_scan"] 
+    recursion_count: int
     api_data: Optional[Dict]
 
-# --- 3. Nodes ---
-
 def router_node(state: AgentState):
-    """
-    Analyzes request for Intent + ID + Pagination.
-    """
     messages = state["messages"]
-    last_message = messages[-1].content if messages else ""
     
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    current_params = state.get("page_params") or {"limit": 20, "offset": 0}
+    current_offset = current_params.get("offset", 0)
     
-    # Updated Prompt to extract pagination
-    system_prompt = (
-        "Analyze the user's request.\n"
-        "Return a JSON object with THREE keys:\n"
-        "1. 'intent': strictly 'user' or 'item'. Default 'user'.\n"
-        "2. 'entity_id': null if listing, or the string ID if specific.\n"
-        "3. 'page_params': A dictionary with 'limit' and 'offset' integers if mentioned.\n"
-        "   - Default to { 'limit': 10, 'offset': 0 } if not specified.\n"
-        "   - Example: 'Show me 5 users' -> { 'limit': 5, 'offset': 0 }\n"
-        "   - Example: 'Next 10 items' -> { 'limit': 10, 'offset': 10 } (infer logic if possible, otherwise default).\n"
-    )
+    # [FIX] Added 'target_page' integer field to handle math in Python
+    llama_messages = [
+        {"role": "system", "content": (
+            "You are an IT Support Router. Return JSON ONLY.\n"
+            f"CURRENT STATE: Offset is {current_offset}.\n"
+            "INSTRUCTIONS:\n"
+            "1. IF user says 'Page X' -> set 'target_page': X (Integer). DO NOT CALCULATE OFFSET.\n"
+            "2. IF user says 'Next' -> set 'target_page': null, 'action': 'next'.\n"
+            "3. IF user says 'Previous' -> set 'target_page': null, 'action': 'prev'.\n"
+            "\n"
+            "SEARCH MODES:\n"
+            "- IF 'target_page' is set -> 'single_page'.\n"
+            "- IF User says 'Show ALL tickets for X' AND NO PAGE SPECIFIED -> 'deep_scan'.\n"
+            "\n"
+            "FILTERING:\n"
+            "- 'Assigned to X' -> assignee='X', search_query=''.\n"
+            "- 'Status X' -> status='X', search_query=''.\n"
+            "- 'Reset' -> assignee=null, status=null.\n"
+            "\n"
+            "Output Format: {\"search_query\": \"\", \"assignee\": null, \"status\": null, \"target_page\": null, \"action\": null, \"search_mode\": \"single_page\"}"
+        )}
+    ]
     
-    response = llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=last_message)
-    ])
+    for m in messages[-4:]:
+        role = "user" if isinstance(m, HumanMessage) else "assistant"
+        llama_messages.append({"role": role, "content": m.content})
+        
+    response = call_llama(llama_messages)
     
     try:
-        clean_content = response.content.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(clean_content)
-        intent = parsed.get("intent", "user")
-        entity_id = parsed.get("entity_id")
-        # Extract page params safely
-        page_params = parsed.get("page_params", {"limit": 10, "offset": 0})
+        clean = response.replace("```json", "").replace("```", "").strip()
+        if "{" in clean: clean = clean[clean.find("{"):clean.rfind("}")+1]
+        parsed = json.loads(clean)
+        
+        # [PYTHON MATH LOGIC] - 100% Reliable
+        new_offset = current_offset
+        target_page = parsed.get("target_page")
+        action = parsed.get("action")
+        
+        if target_page and isinstance(target_page, int):
+            # Page 1 -> (1-1)*20 = 0
+            # Page 4 -> (4-1)*20 = 60
+            new_offset = (target_page - 1) * 20
+            if new_offset < 0: new_offset = 0
+            
+        elif action == "next":
+            new_offset += 20
+        elif action == "prev":
+            new_offset -= 20
+            if new_offset < 0: new_offset = 0
+            
+        # [GUARDRAIL] Clear search query if filters exist
+        s_query = parsed.get("search_query") or ""
+        if parsed.get("assignee") or parsed.get("status"):
+            s_query = ""
+
+        return {
+            "search_query": s_query,
+            "assignee": parsed.get("assignee"),
+            "status": parsed.get("status"),
+            "search_mode": parsed.get("search_mode", "single_page"),
+            "page_params": {"limit": 20, "offset": new_offset}, # Updated Offset
+            "recursion_count": 0, 
+            "api_data": []
+        }
     except:
-        intent = "user"
-        entity_id = None
-        page_params = {"limit": 10, "offset": 0}
-        
-    return {"intent": intent, "entity_id": entity_id, "page_params": page_params}
+        return {"search_query": "", "search_mode": "single_page", "page_params": {"limit": 20, "offset": 0}, "recursion_count": 0}
 
-def fetch_user_node(state: AgentState):
-    """Execute User API calls."""
-    entity_id = state.get("entity_id")
-    page_params = state.get("page_params") or {}
+def fetch_process_node(state: AgentState):
+    """Fetches EXACT page and then filters."""
+    query = state.get("search_query") or ""
+    assignee = state.get("assignee")
+    status = state.get("status")
+    
+    params = state.get("page_params")
+    current_offset = params.get("offset", 0)
+    
+    if state.get("search_mode") == "deep_scan" and state.get("recursion_count") == 0:
+        current_offset = 0
 
-    try:
-        if entity_id:
-            # Single ID fetch (no pagination)
-            data = get_user.invoke({"user_id": entity_id})
-        else:
-            # List fetch (WITH pagination)
-            # We pass the dictionary directly; LangChain maps keys to arguments
-            data = list_users.invoke(page_params)
-    except Exception as e:
-        data = {"error": str(e)}
-        
-    return {"api_data": data}
+    raw_data = list_tickets.invoke({
+        "limit": 20, 
+        "offset": current_offset, 
+        "search_query": query
+    })
+    
+    if isinstance(raw_data, dict) and "error" in raw_data:
+        return {"api_data": []}
 
-def fetch_item_node(state: AgentState):
-    """Execute Item API calls."""
-    entity_id = state.get("entity_id")
-    page_params = state.get("page_params") or {}
+    if assignee or status:
+        filtered_data = filter_tickets_tool.invoke({
+            "tickets": raw_data,
+            "assignee_name": assignee,
+            "status_name": status
+        })
+    else:
+        filtered_data = raw_data
 
-    try:
-        if entity_id:
-            data = get_item.invoke({"item_id": entity_id})
-        else:
-            data = list_items.invoke(page_params)
-    except Exception as e:
-        data = {"error": str(e)}
+    return {"api_data": filtered_data}
 
-    return {"api_data": data}
+def check_results_node(state: AgentState):
+    """Loop Logic."""
+    data = state.get("api_data") or []
+    mode = state.get("search_mode")
+    count = state.get("recursion_count", 0)
+    params = state.get("page_params")
+    current_offset = params.get("offset", 0)
+    
+    # Stop if data found, or not deep_scan, or limit reached
+    if len(data) > 0 or mode != "deep_scan" or count >= 5:
+        return "rephrase"
+    
+    print(f"DEBUG: Deep Scan active. Nothing found on Offset {current_offset}. Checking next page...")
+    new_offset = current_offset + 20
+    return {
+        "page_params": {"limit": 20, "offset": new_offset},
+        "recursion_count": count + 1
+    }
 
 def rephrase_node(state: AgentState):
-    """Summarize the API data."""
-    data = state.get("api_data")
-    messages = state["messages"]
+    data = state.get("api_data") or []
+    count = state.get("recursion_count", 0)
     
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    scan_note = ""
+    if count > 0:
+        scan_note = f"(Scanned {count + 1} pages to find these results.)\n\n"
     
+    if not data:
+        return {"messages": [AIMessage(content=f"{scan_note}No tickets found matching your criteria.")]}
+        
     prompt = (
-        "You are a helpful assistant. \n"
-        f"The user asked: '{messages[-1].content}'\n"
-        f"The API returned: {json.dumps(data)}\n\n"
-        "Please provide a clear, natural language answer summarizing this data. "
-        "If it is a list, mention how many items were retrieved."
-        "If there was an error, apologize and explain it."
+        f"Data: {json.dumps(data)}\n\n"
+        "SYSTEM INSTRUCTIONS:\n"
+        "1. You are a Text Formatter. Do NOT write Python code.\n"
+        "2. Output a clean Markdown list.\n"
+        "3. Format exactly like this example:\n"
+        "   - **TASK-123** Summary Text (Status: Open, Assigned: Name)\n"
+        f"4. Start your response with this note: {scan_note}"
     )
     
-    response = llm.invoke([HumanMessage(content=prompt)])
-    
-    return {"messages": [response]}
+    response = call_llama([{"role": "user", "content": prompt}])
+    return {"messages": [AIMessage(content=response)]}
 
-# ---  Graph Construction ---
+# --- 5. GRAPH CONSTRUCTION ---
 
 def build_agent():
     workflow = StateGraph(AgentState)
 
     workflow.add_node("router", router_node)
-    workflow.add_node("user_tool", fetch_user_node)
-    workflow.add_node("item_tool", fetch_item_node)
+    workflow.add_node("processor", fetch_process_node)
     workflow.add_node("rephrase", rephrase_node)
 
     workflow.set_entry_point("router")
-
-    def route_decision(state: AgentState):
-        if state["intent"] == "item":
-            return "item_tool"
-        return "user_tool"
+    
+    workflow.add_edge("router", "processor")
+    
+    def decision_logic(state):
+        data = state.get("api_data") or []
+        mode = state.get("search_mode")
+        count = state.get("recursion_count", 0)
+        
+        if len(data) > 0:
+            return "rephrase"
+        
+        if mode == "deep_scan" and count < 5:
+            return "loop"
+            
+        return "rephrase"
 
     workflow.add_conditional_edges(
-        "router",
-        route_decision,
-        {
-            "user_tool": "user_tool",
-            "item_tool": "item_tool"
-        }
+        "processor",
+        decision_logic,
+        {"loop": "processor", "rephrase": "rephrase"}
     )
-
-    workflow.add_edge("user_tool", "rephrase")
-    workflow.add_edge("item_tool", "rephrase")
+    
     workflow.add_edge("rephrase", END)
 
     memory = MemorySaver()
     return workflow.compile(checkpointer=memory)
 
-# --- 5. Execution Wrapper ---
-
 def run_chat(message: str, thread_id: Optional[str] = None) -> Dict[str, Any]:
     agent = build_agent()
     tid = thread_id or "default"
-
-    initial_state = {"messages": [HumanMessage(content=message)]}
-    
     result = agent.invoke(
-        initial_state,
+        {"messages": [HumanMessage(content=message)]},
         config={"configurable": {"thread_id": tid}},
     )
-    
-    answer = result["messages"][-1].content
-    return {"answer": answer, "thread_id": tid}
+    return {"answer": result["messages"][-1].content, "thread_id": tid}
