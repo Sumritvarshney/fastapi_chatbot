@@ -1,0 +1,13 @@
+[config]
+# Force the model to Google Gemini
+model = "gemini/gemini-1.5-flash"
+fallback_models = ["gemini/gemini-1.5-pro"]
+
+# Force the provider
+provider = "google"
+
+[pr_reviewer]
+# Customize the bot's personality
+extra_instructions = "Focus on critical bugs, security, and performance. Be concise."
+require_score_review = false
+require_tests_review = false
