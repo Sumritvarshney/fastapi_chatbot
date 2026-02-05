@@ -28,7 +28,7 @@ jobs:
           
           # Force the provider and model
           CONFIG.PROVIDER: "google"
-          CONFIG.MODEL: "gemini/gemini-1.5-flash"
+          CONFIG.MODEL: "models/gemini/gemini-1.5-flash"
           CONFIG.FALLBACK_MODELS: '["gemini/gemini-1.5-flash"]'
           
           # Disable extra features that might crash on Free Tier
