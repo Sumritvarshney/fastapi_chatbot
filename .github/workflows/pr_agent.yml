@@ -20,8 +20,13 @@ jobs:
       - id: pr-agent
         uses: Codium-ai/pr-agent@main
         env:
-          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # --- GEMINI CONFIGURATION ---
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CONFIG.MODEL: "gpt-3.5-turbo"  # <--- ADD THIS LINE
-          # Optional: Custom configurations
-          # PR_REVIEWER.EXTRA_INSTRUCTIONS: "Focus on security vulnerabilities and variable naming."
+          
+          # Force the agent to use Google's Gemini
+          CONFIG.PROVIDER: "google"
+          CONFIG.MODEL: "gemini-1.5-flash"
+          
+          # Optional: Make the review nicer
+          PR_REVIEWER.EXTRA_INSTRUCTIONS: "Be concise and focus on bugs and clean code."
