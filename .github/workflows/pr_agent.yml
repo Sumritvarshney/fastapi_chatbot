@@ -17,16 +17,22 @@ jobs:
     name: Run PR Agent
     if: ${{ github.event.sender.type != 'Bot' }}
     steps:
-      - id: pr-agent
+     - id: pr-agent
         uses: Codium-ai/pr-agent@main
         env:
-          # --- GEMINI CONFIGURATION ---
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
-          # Force the agent to use Google's Gemini
+          # 1. CRITICAL FIX: Map your secret to the exact name the tool expects
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          
+          # 2. Add the 'gemini/' prefix to the model name
+          CONFIG.MODEL: "gemini/gemini-1.5-flash"
+          
+          # 3. Prevent it from falling back to OpenAI (which fails)
+          CONFIG.FALLBACK_MODELS: '["gemini/gemini-1.5-flash"]'
+          
+          # 4. Force Google provider
           CONFIG.PROVIDER: "google"
-          CONFIG.MODEL: "gemini-1.5-flash"
           
           # Optional: Make the review nicer
           PR_REVIEWER.EXTRA_INSTRUCTIONS: "Be concise and focus on bugs and clean code."
